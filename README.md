@@ -94,7 +94,7 @@ POST /v1/stream  ──►      │  StreamSession   │
 Any class with `model: str` and `stream(prompt) -> AsyncIterator[Chunk]` is a backend. Ships with:
 
 * **`MockLLM`** — deterministic, supports `delay`, `fail_after`, and an `on_cancel` callback. Used by every test.
-* **`AnthropicLLM`** — wraps `anthropic.AsyncAnthropic.messages.stream()`, normalises text deltas to `Chunk(text, index, finish)`.
+* **`AnthropicLLM`** — wraps `anthropic.AsyncAnthropic.messages.stream()`, normalises text deltas to `Chunk(text, index, finish)`. The client gets an explicit `timeout` (60 s for the connect and each read) and `max_retries` (2), so a stalled upstream fails the session instead of holding it for the SDK's 10-minute default.
 
 OpenAI / Groq / Bedrock adapters are mechanical — same interface, different SDK call.
 

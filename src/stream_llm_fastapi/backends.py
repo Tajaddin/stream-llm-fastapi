@@ -98,6 +98,10 @@ class AnthropicLLM:
 
     Normalises Anthropic deltas into :class:`Chunk`. Lazy imports the SDK so
     ``stream-llm-fastapi`` runs in environments without anthropic installed.
+
+    ``timeout`` (seconds) bounds the connect and each read of the stream, so a
+    stalled upstream fails the session instead of holding it for the SDK's
+    10-minute default.
     """
 
     def __init__(
@@ -106,6 +110,8 @@ class AnthropicLLM:
         api_key: str | None = None,
         max_tokens: int = 1024,
         system: str | None = None,
+        timeout: float = 60.0,
+        max_retries: int = 2,
     ) -> None:
         from anthropic import AsyncAnthropic  # noqa: F401  (lazy)
 
@@ -113,11 +119,15 @@ class AnthropicLLM:
         self._api_key = api_key or os.environ.get("ANTHROPIC_API_KEY")
         self.max_tokens = max_tokens
         self.system = system
+        self.timeout = timeout
+        self.max_retries = max_retries
 
     async def stream(self, prompt: str) -> AsyncIterator[Chunk]:
         from anthropic import AsyncAnthropic
 
-        client = AsyncAnthropic(api_key=self._api_key)
+        client = AsyncAnthropic(
+            api_key=self._api_key, timeout=self.timeout, max_retries=self.max_retries
+        )
         kwargs: dict = {
             "model": self.model,
             "max_tokens": self.max_tokens,
