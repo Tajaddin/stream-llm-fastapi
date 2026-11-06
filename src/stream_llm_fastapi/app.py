@@ -21,6 +21,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
+from starlette.types import Receive, Scope, Send
 
 from stream_llm_fastapi.backends import LLMBackend, MockLLM
 from stream_llm_fastapi.session import (
@@ -33,6 +34,20 @@ from stream_llm_fastapi.session import (
 
 class StreamRequest(BaseModel):
     prompt: str = Field(..., min_length=1, max_length=64_000)
+
+
+class _SessionEventSourceResponse(EventSourceResponse):
+    """SSE response for a new session that pauses it if the body never started."""
+
+    def __init__(self, content, session: StreamSession) -> None:
+        super().__init__(content)
+        self.session = session
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            self.session.pause_if_never_started()
 
 
 def _format_chunk(session_id: str, chunk) -> str:
@@ -160,7 +175,7 @@ def create_app(
             async for evt in _generate_sse(session, registry, request):
                 yield evt
 
-        return EventSourceResponse(event_iter())
+        return _SessionEventSourceResponse(event_iter(), session)
 
     @app.get("/v1/stream/{session_id}/resume")
     async def resume(session_id: str, request: Request, from_index: int = -1):

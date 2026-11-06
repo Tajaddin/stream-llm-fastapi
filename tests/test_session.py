@@ -143,13 +143,13 @@ async def test_session_cap_evicts_oldest_finished_then_refuses():
 
 
 @pytest.mark.asyncio
-async def test_session_cap_evicts_a_session_whose_response_never_started():
+async def test_session_cap_does_not_evict_a_session_that_has_not_started_yet():
     registry = StreamRegistry(max_sessions=2)
-    abandoned = registry.new_session(prompt="p", backend=MockLLM())
+    starting = registry.new_session(prompt="p", backend=MockLLM())
     running = _running_session(registry)
 
-    third = registry.new_session(prompt="p", backend=MockLLM())
+    with pytest.raises(SessionLimitError):
+        registry.new_session(prompt="p", backend=MockLLM())
 
-    assert abandoned.session_id not in registry.sessions
-    assert set(registry.sessions) == {running.session_id, third.session_id}
+    assert set(registry.sessions) == {starting.session_id, running.session_id}
     await _stop(running)

@@ -94,6 +94,18 @@ class StreamSession:
             except asyncio.QueueFull:
                 await self.queue.put(_SENTINEL)
 
+    def pause_if_never_started(self) -> None:
+        """Stop a session whose response ended before it started the producer.
+
+        The producer starts only once the response body is iterated. A client
+        that leaves before that would otherwise leave the session running,
+        holding a slot under the cap until it expires.
+        """
+        if self.producer_task is None:
+            self.state = SessionState.PAUSED
+            self.last_error = "interrupted: client disconnected before the stream started"
+            self.finished_at = time.monotonic()
+
     @property
     def partial_text(self) -> str:
         return "".join(self.accumulator)
@@ -111,10 +123,10 @@ class StreamRegistry:
 
     Memory is bounded two ways: a session that has stopped (done, failed or
     paused) is dropped ``session_ttl`` seconds later, and the registry holds
-    at most ``max_sessions``. At the cap the oldest idle sessions make room:
-    stopped ones, and ones whose response never started its producer. If
-    every session is still running, :meth:`new_session` raises
-    :class:`SessionLimitError`.
+    at most ``max_sessions``. At the cap the oldest stopped sessions make
+    room. A session whose producer has not started yet counts as running,
+    because its response may still be about to start it. If every session
+    is running, :meth:`new_session` raises :class:`SessionLimitError`.
     """
 
     def __init__(
@@ -132,8 +144,8 @@ class StreamRegistry:
     def _expired(self, session: StreamSession, now: float) -> bool:
         if session.finished_at is not None:
             return now - session.finished_at > self.session_ttl
-        # A response that was cancelled before its first event never starts
-        # a producer, so nothing would ever mark the session finished.
+        # A session whose response never ran has no producer, and nothing
+        # else would ever mark it finished.
         return session.producer_task is None and now - session.created_at > self.session_ttl
 
     def drop_expired(self) -> None:
@@ -145,15 +157,11 @@ class StreamRegistry:
         self.drop_expired()
         excess = len(self.sessions) - self.max_sessions + 1
         if excess > 0:
-            idle = sorted(
-                (
-                    s
-                    for s in self.sessions.values()
-                    if s.finished_at is not None or s.producer_task is None
-                ),
-                key=lambda s: s.finished_at if s.finished_at is not None else s.created_at,
+            stopped = sorted(
+                (s for s in self.sessions.values() if s.finished_at is not None),
+                key=lambda s: s.finished_at,
             )
-            for s in idle[:excess]:
+            for s in stopped[:excess]:
                 del self.sessions[s.session_id]
 
     def new_session(self, prompt: str, backend: LLMBackend) -> StreamSession:

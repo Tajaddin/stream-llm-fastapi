@@ -327,6 +327,61 @@ async def test_stream_rejected_when_session_limit_reached():
 
 
 @pytest.mark.asyncio
+async def test_burst_beyond_session_limit_is_refused_without_evicting_live_streams():
+    """Each handler returns before its response starts the producer, so a
+    burst of POSTs must not evict each other's streams to make room."""
+    backends: list[MockLLM] = []
+
+    def factory():
+        backends.append(MockLLM(response="a b c", delay=0.05))
+        return backends[-1]
+
+    app = create_app(backend_factory=factory, max_sessions=2)
+
+    caps = await asyncio.wait_for(
+        asyncio.gather(
+            *(
+                _run_request(app, _scope("POST", "/v1/stream"), b'{"prompt":"hi"}')
+                for _ in range(20)
+            )
+        ),
+        10,
+    )
+
+    assert sorted(c.status for c in caps) == [200] * 2 + [503] * 18
+    assert sum(1 for b in backends if b.chunks_yielded) == 2
+    served = {c.parse_sse()[0]["data"]["session"] for c in caps if c.status == 200}
+    assert served == set(app.state.registry.sessions)
+
+
+@pytest.mark.asyncio
+async def test_client_gone_before_first_event_leaves_a_paused_session():
+    """The client disconnects while the response headers are still being
+    sent, so the body, and with it the producer, never starts. The session
+    must stop like any other disconnected stream and free its slot."""
+    backend = MockLLM()
+    app = create_app(backend_factory=lambda: backend, max_sessions=1)
+    messages = [{"type": "http.request", "body": b'{"prompt":"hi"}', "more_body": False}]
+
+    async def receive():
+        return messages.pop() if messages else {"type": "http.disconnect"}
+
+    async def send(msg):
+        if msg["type"] == "http.response.start":
+            await asyncio.sleep(0.1)
+
+    await asyncio.wait_for(app(_scope("POST", "/v1/stream"), receive, send), 5)
+
+    (session,) = app.state.registry.sessions.values()
+    assert session.producer_task is None
+    assert backend.chunks_yielded == 0
+    assert session.state == SessionState.PAUSED
+
+    cap = await _run_request(app, _scope("POST", "/v1/stream"), b'{"prompt":"hi"}')
+    assert cap.status == 200
+
+
+@pytest.mark.asyncio
 async def test_healthz_does_not_count_expired_sessions():
     app = create_app(session_ttl=60.0)
     expired = app.state.registry.new_session(prompt="p", backend=MockLLM())
