@@ -48,7 +48,7 @@ class StreamSession:
     last_index: int = -1
     last_error: str | None = None
     producer_task: asyncio.Task | None = None
-    created_at: float = field(default_factory=time.time)
+    created_at: float = field(default_factory=time.monotonic)
     finished_at: float | None = None
 
     async def run(self) -> None:
@@ -72,7 +72,7 @@ class StreamSession:
             # consumer disconnected — preserve partial for resume
             self.state = SessionState.PAUSED
             self.last_error = "interrupted: client disconnected before the stream finished"
-            self.finished_at = time.time()
+            self.finished_at = time.monotonic()
             # Best-effort sentinel; if queue is full there's nobody draining
             # anyway and we don't want to block cleanup on it.
             try:
@@ -86,7 +86,7 @@ class StreamSession:
         except Exception as exc:  # noqa: BLE001
             self.state = SessionState.FAILED
             self.last_error = f"{type(exc).__name__}: {exc}"
-        self.finished_at = time.time()
+        self.finished_at = time.monotonic()
         # For DONE / FAILED, push the sentinel so any waiting consumer wakes.
         if self.state in (SessionState.DONE, SessionState.FAILED):
             try:
@@ -137,7 +137,7 @@ class StreamRegistry:
         return session.producer_task is None and now - session.created_at > self.session_ttl
 
     def _evict(self) -> None:
-        now = time.time()
+        now = time.monotonic()
         for sid in [sid for sid, s in self.sessions.items() if self._expired(s, now)]:
             del self.sessions[sid]
         excess = len(self.sessions) - self.max_sessions + 1
@@ -167,7 +167,7 @@ class StreamRegistry:
 
     def get(self, session_id: str) -> StreamSession | None:
         session = self.sessions.get(session_id)
-        if session is not None and self._expired(session, time.time()):
+        if session is not None and self._expired(session, time.monotonic()):
             del self.sessions[session_id]
             return None
         return session

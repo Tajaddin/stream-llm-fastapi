@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 
 import pytest
 
@@ -100,6 +101,18 @@ def test_session_whose_response_never_started_expires():
     session.created_at -= 61.0
 
     assert registry.get(session.session_id) is None
+
+
+@pytest.mark.asyncio
+async def test_wall_clock_jump_does_not_expire_sessions(monkeypatch):
+    registry = StreamRegistry(session_ttl=60.0)
+    finished = await _finished_session(registry)
+    never_started = registry.new_session(prompt="p", backend=MockLLM())
+    wall = time.time()
+    monkeypatch.setattr(time, "time", lambda: wall + 3600.0)
+
+    assert registry.get(finished.session_id) is finished
+    assert registry.get(never_started.session_id) is never_started
 
 
 def _running_session(registry):
