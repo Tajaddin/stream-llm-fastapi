@@ -56,7 +56,7 @@ data: {"session": "rk2A..."}
 | Method | Path | Behavior |
 |---|---|---|
 | `POST` | `/v1/stream` | Start a new completion. Returns SSE: `message` per chunk, `done` on success, `error` on upstream failure. |
-| `GET`  | `/v1/stream/{session_id}/resume?from_index=N` | Re-attach to a paused or failed session. Replays accumulator starting after `from_index`. |
+| `GET`  | `/v1/stream/{session_id}/resume?from_index=N` | Re-attach to a paused, failed or finished session. Replays the accumulator after `from_index`, then `done` (finished) or `error` (failed, or cut off by a disconnect). The completion is not re-run. |
 | `DELETE` | `/v1/stream/{session_id}` | Drop the session (cancels producer if still running). |
 | `GET`  | `/healthz` | `{"status": "ok", "active_sessions": N}` |
 

@@ -70,6 +70,7 @@ class StreamSession:
         except asyncio.CancelledError:
             # consumer disconnected — preserve partial for resume
             self.state = SessionState.PAUSED
+            self.last_error = "interrupted: client disconnected before the stream finished"
             # Best-effort sentinel; if queue is full there's nobody draining
             # anyway and we don't want to block cleanup on it.
             try:

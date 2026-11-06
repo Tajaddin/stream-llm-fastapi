@@ -272,3 +272,43 @@ async def test_mid_stream_error_then_resume():
 
     resume_errs = [e for e in events2 if e.get("event") == "error"]
     assert resume_errs, "resume should re-emit the error event for FAILED sessions"
+
+
+@pytest.mark.asyncio
+async def test_resume_after_disconnect_replays_without_restarting_upstream():
+    """A client that disconnects mid-stream can resume: it gets every chunk
+    produced after the last one it saw, then a terminal event. The upstream
+    call is not re-run, and the session stays resumable."""
+    backend = MockLLM(response=" ".join(f"t{i}" for i in range(40)), delay=0.01)
+    app = create_app(backend_factory=lambda: backend, queue_maxsize=4)
+
+    cap = await _run_request(
+        app,
+        _scope("POST", "/v1/stream"),
+        b'{"prompt":"hi"}',
+        disconnect_after_chunks=3,
+    )
+    await asyncio.sleep(0.1)
+
+    session = next(iter(app.state.registry.sessions.values()))
+    assert session.state == SessionState.PAUSED
+    seen = [e["data"] for e in cap.parse_sse() if e.get("event") == "message"]
+    last = seen[-1]["index"]
+    yielded = backend.chunks_yielded
+
+    for _ in range(2):
+        scope = _scope("GET", f"/v1/stream/{session.session_id}/resume")
+        scope["query_string"] = f"from_index={last}".encode()
+        cap2 = await asyncio.wait_for(_run_request(app, scope, b""), 5)
+
+        assert cap2.status == 200
+        events = cap2.parse_sse()
+        replayed = [e["data"] for e in events if e.get("event") == "message"]
+        assert [d["index"] for d in replayed] == list(range(last + 1, len(session.accumulator)))
+        assert "".join(d["text"] for d in seen + replayed) == session.partial_text
+        assert events[-1]["event"] == "error"
+        assert events[-1]["data"]["partial_text"] == session.partial_text
+
+    assert session.state == SessionState.PAUSED
+    assert backend.chunks_yielded == yielded, "resume must not re-run the upstream call"
+

@@ -5,8 +5,9 @@ Routes:
 * ``POST /v1/stream`` — start a new streamed completion. Returns an SSE
   response with ``data: {"index": N, "text": "...", "session": "..."}``
   events and a final ``event: done`` or ``event: error`` event.
-* ``GET /v1/stream/{session_id}/resume`` — re-attach to a paused or failed
-  session and resume the stream from the last sent index.
+* ``GET /v1/stream/{session_id}/resume`` — re-attach to a paused, failed or
+  finished session: replay the chunks after ``from_index``, then ``done`` or
+  ``error``. The completion is not re-run.
 * ``GET /healthz`` — liveness.
 """
 
@@ -53,37 +54,35 @@ async def _generate_sse(
     skip_to_index: int = -1,
 ):
     """Yield SSE events while honoring client disconnect detection."""
-    # ensure producer is running
-    if session.producer_task is None or session.producer_task.done():
-        # If we're resuming a session that finished while disconnected, just
-        # replay accumulator and emit done/error.
-        if session.state in (SessionState.DONE, SessionState.FAILED):
-            for i, txt in enumerate(session.accumulator):
-                if i <= skip_to_index:
-                    continue
-                yield {
-                    "event": "message",
-                    "data": json.dumps(
-                        {"session": session.session_id, "index": i, "text": txt, "finish": False}
-                    ),
-                }
-            if session.state == SessionState.DONE:
-                yield {"event": "done", "data": json.dumps({"session": session.session_id})}
-            else:
-                yield {
-                    "event": "error",
-                    "data": json.dumps(
-                        {
-                            "session": session.session_id,
-                            "error": session.last_error or "unknown",
-                            "last_index": session.last_index,
-                            "partial_text": session.partial_text,
-                        }
-                    ),
-                }
-            return
-        # Otherwise start the producer fresh.
-        session.state = SessionState.RUNNING
+    # A stopped producer means the accumulator is final: replay it and end
+    # with the terminal event. A paused session is never restarted, because
+    # the backend would run the completion again from the first token.
+    if session.state in (SessionState.DONE, SessionState.FAILED, SessionState.PAUSED):
+        for i, txt in enumerate(session.accumulator):
+            if i <= skip_to_index:
+                continue
+            yield {
+                "event": "message",
+                "data": json.dumps(
+                    {"session": session.session_id, "index": i, "text": txt, "finish": False}
+                ),
+            }
+        if session.state == SessionState.DONE:
+            yield {"event": "done", "data": json.dumps({"session": session.session_id})}
+        else:
+            yield {
+                "event": "error",
+                "data": json.dumps(
+                    {
+                        "session": session.session_id,
+                        "error": session.last_error or "unknown",
+                        "last_index": session.last_index,
+                        "partial_text": session.partial_text,
+                    }
+                ),
+            }
+        return
+    if session.producer_task is None:
         session.producer_task = asyncio.create_task(session.run())
 
     try:
