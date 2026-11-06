@@ -2,7 +2,7 @@
 
 > Production-grade FastAPI + SSE for LLM completions. Three hero properties — **client disconnect cancels upstream**, **slow client backpressures the producer**, **mid-stream errors are resumable** — each guarded by a direct-ASGI integration test that drives `http.disconnect` itself instead of relying on a test client to do it.
 
-[![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE) [![Tests](https://img.shields.io/badge/tests-6%20passing-brightgreen)](#tests) [![Python](https://img.shields.io/badge/python-3.10%2B-blue)]()
+[![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE) [![Tests](https://img.shields.io/badge/tests-13%20passing-brightgreen)](#tests) [![Python](https://img.shields.io/badge/python-3.10%2B-blue)]()
 
 ## The three problems most SSE LLM endpoints get wrong
 
@@ -107,12 +107,19 @@ pytest -v
 
 ```
 tests/test_app_integration.py::test_client_disconnect_cancels_producer PASSED
-tests/test_app_integration.py::test_backpressure_under_slow_consumer    PASSED
-tests/test_app_integration.py::test_mid_stream_error_then_resume        PASSED
-tests/test_session.py::test_session_runs_to_done                        PASSED
-tests/test_session.py::test_session_failure_preserves_partial           PASSED
+tests/test_app_integration.py::test_backpressure_under_slow_consumer PASSED
+tests/test_app_integration.py::test_mid_stream_error_then_resume PASSED
+tests/test_app_integration.py::test_resume_after_disconnect_replays_without_restarting_upstream PASSED
+tests/test_app_integration.py::test_stream_rejected_when_session_limit_reached PASSED
+tests/test_backends.py::test_anthropic_client_gets_explicit_timeout_and_retries PASSED
+tests/test_backends.py::test_anthropic_timeout_and_retries_are_configurable PASSED
+tests/test_session.py::test_session_runs_to_done PASSED
+tests/test_session.py::test_session_failure_preserves_partial PASSED
 tests/test_session.py::test_backpressure_blocks_producer_when_consumer_slow PASSED
-6 passed in 1.20s
+tests/test_session.py::test_finished_sessions_expire_after_ttl PASSED
+tests/test_session.py::test_session_whose_response_never_started_expires PASSED
+tests/test_session.py::test_session_cap_evicts_oldest_finished_then_refuses PASSED
+13 passed in 2.61s
 ```
 
 ### What each integration test checks
@@ -120,6 +127,7 @@ tests/test_session.py::test_backpressure_blocks_producer_when_consumer_slow PASS
 * **`test_client_disconnect_cancels_producer`** — after 3 chunks are delivered, the harness emits `http.disconnect`. The producer stops within a handful of tokens (asserted `< 30` of 200), and the session is in `PAUSED` state in the registry.
 * **`test_backpressure_under_slow_consumer`** — `send()` sleeps 20 ms per chunk. With `queue_maxsize=4`, the producer never runs more than `delivered + maxsize + writer_in_flight` tokens ahead.
 * **`test_mid_stream_error_then_resume`** — `MockLLM(fail_after=3)`. The first response emits 3 `message` events then an `error` event with `partial_text="alpha beta gamma"`. A `GET /resume` replays the same partial and re-emits the same error event (FAILED sessions stay FAILED).
+* **`test_resume_after_disconnect_replays_without_restarting_upstream`** — disconnect after 3 chunks, then resume twice from the last index seen. Each resume replays exactly the chunks produced after it and ends with an `error` event; the session stays `PAUSED` and the backend yields no new tokens.
 
 ## Project layout
 
