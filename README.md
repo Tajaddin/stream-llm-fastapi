@@ -2,7 +2,7 @@
 
 > Production-grade FastAPI + SSE for LLM completions. Three hero properties — **client disconnect cancels upstream**, **slow client backpressures the producer**, **mid-stream errors are resumable** — each guarded by a direct-ASGI integration test that drives `http.disconnect` itself instead of relying on a test client to do it.
 
-[![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE) [![Tests](https://img.shields.io/badge/tests-13%20passing-brightgreen)](#tests) [![Python](https://img.shields.io/badge/python-3.10%2B-blue)]()
+[![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE) [![Tests](https://img.shields.io/badge/tests-14%20passing-brightgreen)](#tests) [![Python](https://img.shields.io/badge/python-3.10%2B-blue)]()
 
 ## The three problems most SSE LLM endpoints get wrong
 
@@ -119,7 +119,8 @@ tests/test_session.py::test_backpressure_blocks_producer_when_consumer_slow PASS
 tests/test_session.py::test_finished_sessions_expire_after_ttl PASSED
 tests/test_session.py::test_session_whose_response_never_started_expires PASSED
 tests/test_session.py::test_session_cap_evicts_oldest_finished_then_refuses PASSED
-13 passed in 2.61s
+tests/test_session.py::test_session_cap_evicts_a_session_whose_response_never_started PASSED
+14 passed in 2.12s
 ```
 
 ### What each integration test checks
@@ -147,7 +148,7 @@ tests/test_session.py::test_session_cap_evicts_oldest_finished_then_refuses PASS
 
 ## Limitations
 
-**In-process session registry.** Sessions live in memory. A real deployment behind a load balancer needs Redis (or similar) so a resume request can hit a different worker. The `StreamRegistry` interface is intentionally small — swapping the dict for a Redis-backed implementation is a few hundred lines. Memory is bounded: a stopped session (done, failed or paused) is dropped `session_ttl` seconds later (default 300), and the registry holds at most `max_sessions` (default 1000). At the cap the oldest stopped sessions make room; if all of them are still streaming, `POST /v1/stream` returns 503.
+**In-process session registry.** Sessions live in memory. A real deployment behind a load balancer needs Redis (or similar) so a resume request can hit a different worker. The `StreamRegistry` interface is intentionally small — swapping the dict for a Redis-backed implementation is a few hundred lines. Memory is bounded: a stopped session (done, failed or paused) is dropped `session_ttl` seconds later (default 300), and the registry holds at most `max_sessions` (default 1000). At the cap the oldest idle sessions make room (stopped ones, and ones whose client left before the first event); if all of them are still streaming, `POST /v1/stream` returns 503. The cap is global, not per client, so one client holding `max_sessions` slow streams open gets every other client a 503.
 
 **No streaming auth/quota gate.** There's no per-key rate limit or auth middleware shipped here. Wire your own FastAPI dependency for those.
 

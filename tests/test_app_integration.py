@@ -316,8 +316,11 @@ async def test_resume_after_disconnect_replays_without_restarting_upstream():
 @pytest.mark.asyncio
 async def test_stream_rejected_when_session_limit_reached():
     app = create_app(backend_factory=lambda: MockLLM(), max_sessions=1)
-    app.state.registry.new_session(prompt="busy", backend=MockLLM())
+    busy = app.state.registry.new_session(prompt="busy", backend=MockLLM(delay=60.0))
+    busy.producer_task = asyncio.create_task(busy.run())
 
     cap = await _run_request(app, _scope("POST", "/v1/stream"), b'{"prompt":"hi"}')
 
     assert cap.status == 503
+    busy.producer_task.cancel()
+    await asyncio.gather(busy.producer_task, return_exceptions=True)

@@ -111,8 +111,9 @@ class StreamRegistry:
 
     Memory is bounded two ways: a session that has stopped (done, failed or
     paused) is dropped ``session_ttl`` seconds later, and the registry holds
-    at most ``max_sessions``. At the cap the oldest stopped sessions make
-    room; if every session is still running, :meth:`new_session` raises
+    at most ``max_sessions``. At the cap the oldest idle sessions make room:
+    stopped ones, and ones whose response never started its producer. If
+    every session is still running, :meth:`new_session` raises
     :class:`SessionLimitError`.
     """
 
@@ -141,11 +142,15 @@ class StreamRegistry:
             del self.sessions[sid]
         excess = len(self.sessions) - self.max_sessions + 1
         if excess > 0:
-            stopped = sorted(
-                (s for s in self.sessions.values() if s.finished_at is not None),
-                key=lambda s: s.finished_at,
+            idle = sorted(
+                (
+                    s
+                    for s in self.sessions.values()
+                    if s.finished_at is not None or s.producer_task is None
+                ),
+                key=lambda s: s.finished_at if s.finished_at is not None else s.created_at,
             )
-            for s in stopped[:excess]:
+            for s in idle[:excess]:
                 del self.sessions[s.session_id]
 
     def new_session(self, prompt: str, backend: LLMBackend) -> StreamSession:
