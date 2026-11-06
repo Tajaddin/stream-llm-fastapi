@@ -136,10 +136,13 @@ class StreamRegistry:
         # a producer, so nothing would ever mark the session finished.
         return session.producer_task is None and now - session.created_at > self.session_ttl
 
-    def _evict(self) -> None:
+    def drop_expired(self) -> None:
         now = time.monotonic()
         for sid in [sid for sid, s in self.sessions.items() if self._expired(s, now)]:
             del self.sessions[sid]
+
+    def _evict(self) -> None:
+        self.drop_expired()
         excess = len(self.sessions) - self.max_sessions + 1
         if excess > 0:
             idle = sorted(

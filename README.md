@@ -2,7 +2,7 @@
 
 > Production-grade FastAPI + SSE for LLM completions. Three hero properties — **client disconnect cancels upstream**, **slow client backpressures the producer**, **mid-stream errors are resumable** — each guarded by a direct-ASGI integration test that drives `http.disconnect` itself instead of relying on a test client to do it.
 
-[![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE) [![Tests](https://img.shields.io/badge/tests-15%20passing-brightgreen)](#tests) [![Python](https://img.shields.io/badge/python-3.10%2B-blue)]()
+[![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE) [![Tests](https://img.shields.io/badge/tests-16%20passing-brightgreen)](#tests) [![Python](https://img.shields.io/badge/python-3.10%2B-blue)]()
 
 ## The three problems most SSE LLM endpoints get wrong
 
@@ -111,6 +111,7 @@ tests/test_app_integration.py::test_backpressure_under_slow_consumer PASSED
 tests/test_app_integration.py::test_mid_stream_error_then_resume PASSED
 tests/test_app_integration.py::test_resume_after_disconnect_replays_without_restarting_upstream PASSED
 tests/test_app_integration.py::test_stream_rejected_when_session_limit_reached PASSED
+tests/test_app_integration.py::test_healthz_does_not_count_expired_sessions PASSED
 tests/test_backends.py::test_anthropic_client_gets_explicit_timeout_and_retries PASSED
 tests/test_backends.py::test_anthropic_timeout_and_retries_are_configurable PASSED
 tests/test_session.py::test_session_runs_to_done PASSED
@@ -121,7 +122,7 @@ tests/test_session.py::test_session_whose_response_never_started_expires PASSED
 tests/test_session.py::test_wall_clock_jump_does_not_expire_sessions PASSED
 tests/test_session.py::test_session_cap_evicts_oldest_finished_then_refuses PASSED
 tests/test_session.py::test_session_cap_evicts_a_session_whose_response_never_started PASSED
-15 passed in 2.43s
+16 passed in 2.01s
 ```
 
 ### What each integration test checks

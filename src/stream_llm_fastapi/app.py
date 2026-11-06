@@ -145,6 +145,7 @@ def create_app(
 
     @app.get("/healthz")
     async def healthz():
+        registry.drop_expired()
         return {"status": "ok", "active_sessions": len(registry.sessions)}
 
     @app.post("/v1/stream")

@@ -324,3 +324,15 @@ async def test_stream_rejected_when_session_limit_reached():
     assert cap.status == 503
     busy.producer_task.cancel()
     await asyncio.gather(busy.producer_task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_healthz_does_not_count_expired_sessions():
+    app = create_app(session_ttl=60.0)
+    expired = app.state.registry.new_session(prompt="p", backend=MockLLM())
+    expired.created_at -= 61.0
+
+    cap = await _run_request(app, _scope("GET", "/healthz"), b"")
+
+    assert cap.status == 200
+    assert json.loads(cap.body_text)["active_sessions"] == 0
