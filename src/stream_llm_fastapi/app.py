@@ -24,6 +24,7 @@ from sse_starlette.sse import EventSourceResponse
 
 from stream_llm_fastapi.backends import LLMBackend, MockLLM
 from stream_llm_fastapi.session import (
+    SessionLimitError,
     SessionState,
     StreamRegistry,
     StreamSession,
@@ -125,6 +126,8 @@ def create_app(
     backend_factory: Callable[[], LLMBackend] | None = None,
     *,
     queue_maxsize: int = 16,
+    session_ttl: float = 300.0,
+    max_sessions: int = 1000,
 ) -> FastAPI:
     """Build a FastAPI app wired to ``backend_factory``.
 
@@ -132,7 +135,9 @@ def create_app(
     state (delays, fail_after, etc).
     """
     app = FastAPI(title="stream-llm-fastapi")
-    registry = StreamRegistry(queue_maxsize=queue_maxsize)
+    registry = StreamRegistry(
+        queue_maxsize=queue_maxsize, session_ttl=session_ttl, max_sessions=max_sessions
+    )
     app.state.registry = registry
     if backend_factory is None:
         backend_factory = lambda: MockLLM()
@@ -145,7 +150,10 @@ def create_app(
     @app.post("/v1/stream")
     async def stream_completion(req: StreamRequest, request: Request):
         backend = app.state.backend_factory()
-        session = registry.new_session(prompt=req.prompt, backend=backend)
+        try:
+            session = registry.new_session(prompt=req.prompt, backend=backend)
+        except SessionLimitError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
 
         async def event_iter():
             async for evt in _generate_sse(session, registry, request):

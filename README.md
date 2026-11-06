@@ -55,7 +55,7 @@ data: {"session": "rk2A..."}
 
 | Method | Path | Behavior |
 |---|---|---|
-| `POST` | `/v1/stream` | Start a new completion. Returns SSE: `message` per chunk, `done` on success, `error` on upstream failure. |
+| `POST` | `/v1/stream` | Start a new completion. Returns SSE: `message` per chunk, `done` on success, `error` on upstream failure. 503 when `max_sessions` streams are already running. |
 | `GET`  | `/v1/stream/{session_id}/resume?from_index=N` | Re-attach to a paused, failed or finished session. Replays the accumulator after `from_index`, then `done` (finished) or `error` (failed, or cut off by a disconnect). The completion is not re-run. |
 | `DELETE` | `/v1/stream/{session_id}` | Drop the session (cancels producer if still running). |
 | `GET`  | `/healthz` | `{"status": "ok", "active_sessions": N}` |
@@ -139,7 +139,7 @@ tests/test_session.py::test_backpressure_blocks_producer_when_consumer_slow PASS
 
 ## Limitations
 
-**In-process session registry.** Sessions live in memory. A real deployment behind a load balancer needs Redis (or similar) so a resume request can hit a different worker. The `StreamRegistry` interface is intentionally small — swapping the dict for a Redis-backed implementation is a few hundred lines.
+**In-process session registry.** Sessions live in memory. A real deployment behind a load balancer needs Redis (or similar) so a resume request can hit a different worker. The `StreamRegistry` interface is intentionally small — swapping the dict for a Redis-backed implementation is a few hundred lines. Memory is bounded: a stopped session (done, failed or paused) is dropped `session_ttl` seconds later (default 300), and the registry holds at most `max_sessions` (default 1000). At the cap the oldest stopped sessions make room; if all of them are still streaming, `POST /v1/stream` returns 503.
 
 **No streaming auth/quota gate.** There's no per-key rate limit or auth middleware shipped here. Wire your own FastAPI dependency for those.
 

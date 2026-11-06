@@ -7,7 +7,7 @@ import asyncio
 import pytest
 
 from stream_llm_fastapi.backends import MockLLM
-from stream_llm_fastapi.session import SessionState, StreamRegistry
+from stream_llm_fastapi.session import SessionLimitError, SessionState, StreamRegistry
 
 
 async def _drain(session, registry):
@@ -71,3 +71,46 @@ async def test_backpressure_blocks_producer_when_consumer_slow():
         await session.producer_task
     except asyncio.CancelledError:
         pass
+
+
+async def _finished_session(registry):
+    session = registry.new_session(prompt="p", backend=MockLLM(response="a b"))
+    session.producer_task = asyncio.create_task(session.run())
+    await _drain(session, registry)
+    await session.producer_task
+    return session
+
+
+@pytest.mark.asyncio
+async def test_finished_sessions_expire_after_ttl():
+    registry = StreamRegistry(session_ttl=60.0)
+    old = await _finished_session(registry)
+    fresh = await _finished_session(registry)
+    old.finished_at -= 61.0
+
+    registry.new_session(prompt="p", backend=MockLLM())
+
+    assert old.session_id not in registry.sessions
+    assert registry.get(fresh.session_id) is fresh
+
+
+def test_session_whose_response_never_started_expires():
+    registry = StreamRegistry(session_ttl=60.0)
+    session = registry.new_session(prompt="p", backend=MockLLM())
+    session.created_at -= 61.0
+
+    assert registry.get(session.session_id) is None
+
+
+@pytest.mark.asyncio
+async def test_session_cap_evicts_oldest_finished_then_refuses():
+    registry = StreamRegistry(max_sessions=2)
+    finished = await _finished_session(registry)
+    running = registry.new_session(prompt="p", backend=MockLLM())
+
+    third = registry.new_session(prompt="p", backend=MockLLM())
+    assert finished.session_id not in registry.sessions
+    assert set(registry.sessions) == {running.session_id, third.session_id}
+
+    with pytest.raises(SessionLimitError):
+        registry.new_session(prompt="p", backend=MockLLM())

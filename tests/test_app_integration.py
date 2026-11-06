@@ -312,3 +312,12 @@ async def test_resume_after_disconnect_replays_without_restarting_upstream():
     assert session.state == SessionState.PAUSED
     assert backend.chunks_yielded == yielded, "resume must not re-run the upstream call"
 
+
+@pytest.mark.asyncio
+async def test_stream_rejected_when_session_limit_reached():
+    app = create_app(backend_factory=lambda: MockLLM(), max_sessions=1)
+    app.state.registry.new_session(prompt="busy", backend=MockLLM())
+
+    cap = await _run_request(app, _scope("POST", "/v1/stream"), b'{"prompt":"hi"}')
+
+    assert cap.status == 503
