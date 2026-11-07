@@ -48,7 +48,8 @@ class StreamSession:
     last_index: int = -1
     last_error: str | None = None
     producer_task: asyncio.Task | None = None
-    created_at: float = field(default_factory=time.time)
+    created_at: float = field(default_factory=time.monotonic)
+    finished_at: float | None = None
 
     async def run(self) -> None:
         """Producer: pull from backend and push onto the queue.
@@ -70,6 +71,8 @@ class StreamSession:
         except asyncio.CancelledError:
             # consumer disconnected — preserve partial for resume
             self.state = SessionState.PAUSED
+            self.last_error = "interrupted: client disconnected before the stream finished"
+            self.finished_at = time.monotonic()
             # Best-effort sentinel; if queue is full there's nobody draining
             # anyway and we don't want to block cleanup on it.
             try:
@@ -83,6 +86,7 @@ class StreamSession:
         except Exception as exc:  # noqa: BLE001
             self.state = SessionState.FAILED
             self.last_error = f"{type(exc).__name__}: {exc}"
+        self.finished_at = time.monotonic()
         # For DONE / FAILED, push the sentinel so any waiting consumer wakes.
         if self.state in (SessionState.DONE, SessionState.FAILED):
             try:
@@ -90,9 +94,25 @@ class StreamSession:
             except asyncio.QueueFull:
                 await self.queue.put(_SENTINEL)
 
+    def pause_if_never_started(self) -> None:
+        """Stop a session whose response ended before it started the producer.
+
+        The producer starts only once the response body is iterated. A client
+        that leaves before that would otherwise leave the session running,
+        holding a slot under the cap until it expires.
+        """
+        if self.producer_task is None:
+            self.state = SessionState.PAUSED
+            self.last_error = "interrupted: client disconnected before the stream started"
+            self.finished_at = time.monotonic()
+
     @property
     def partial_text(self) -> str:
         return "".join(self.accumulator)
+
+
+class SessionLimitError(RuntimeError):
+    """The registry is full of running sessions; nothing can be evicted."""
 
 
 class StreamRegistry:
@@ -100,13 +120,54 @@ class StreamRegistry:
 
     Tracks paused/failed sessions so /resume can pick them up. Production
     deployments would back this with Redis to survive process restarts.
+
+    Memory is bounded two ways: a session that has stopped (done, failed or
+    paused) is dropped ``session_ttl`` seconds later, and the registry holds
+    at most ``max_sessions``. At the cap the oldest stopped sessions make
+    room. A session whose producer has not started yet counts as running,
+    because its response may still be about to start it. If every session
+    is running, :meth:`new_session` raises :class:`SessionLimitError`.
     """
 
-    def __init__(self, queue_maxsize: int = 16) -> None:
+    def __init__(
+        self,
+        queue_maxsize: int = 16,
+        *,
+        session_ttl: float = 300.0,
+        max_sessions: int = 1000,
+    ) -> None:
         self.sessions: dict[str, StreamSession] = {}
         self.queue_maxsize = queue_maxsize
+        self.session_ttl = session_ttl
+        self.max_sessions = max_sessions
+
+    def _expired(self, session: StreamSession, now: float) -> bool:
+        if session.finished_at is not None:
+            return now - session.finished_at > self.session_ttl
+        # A session whose response never ran has no producer, and nothing
+        # else would ever mark it finished.
+        return session.producer_task is None and now - session.created_at > self.session_ttl
+
+    def drop_expired(self) -> None:
+        now = time.monotonic()
+        for sid in [sid for sid, s in self.sessions.items() if self._expired(s, now)]:
+            del self.sessions[sid]
+
+    def _evict(self) -> None:
+        self.drop_expired()
+        excess = len(self.sessions) - self.max_sessions + 1
+        if excess > 0:
+            stopped = sorted(
+                (s for s in self.sessions.values() if s.finished_at is not None),
+                key=lambda s: s.finished_at,
+            )
+            for s in stopped[:excess]:
+                del self.sessions[s.session_id]
 
     def new_session(self, prompt: str, backend: LLMBackend) -> StreamSession:
+        self._evict()
+        if len(self.sessions) >= self.max_sessions:
+            raise SessionLimitError(f"{self.max_sessions} sessions are already running")
         session_id = secrets.token_urlsafe(12)
         queue: asyncio.Queue = asyncio.Queue(maxsize=self.queue_maxsize)
         session = StreamSession(
@@ -116,7 +177,11 @@ class StreamRegistry:
         return session
 
     def get(self, session_id: str) -> StreamSession | None:
-        return self.sessions.get(session_id)
+        session = self.sessions.get(session_id)
+        if session is not None and self._expired(session, time.monotonic()):
+            del self.sessions[session_id]
+            return None
+        return session
 
     def drop(self, session_id: str) -> None:
         self.sessions.pop(session_id, None)

@@ -2,7 +2,7 @@
 
 > Production-grade FastAPI + SSE for LLM completions. Three hero properties — **client disconnect cancels upstream**, **slow client backpressures the producer**, **mid-stream errors are resumable** — each guarded by a direct-ASGI integration test that drives `http.disconnect` itself instead of relying on a test client to do it.
 
-[![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE) [![Tests](https://img.shields.io/badge/tests-6%20passing-brightgreen)](#tests) [![Python](https://img.shields.io/badge/python-3.10%2B-blue)]()
+[![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE) [![Tests](https://img.shields.io/badge/tests-18%20passing-brightgreen)](#tests) [![Python](https://img.shields.io/badge/python-3.10%2B-blue)]()
 
 ## The three problems most SSE LLM endpoints get wrong
 
@@ -55,8 +55,8 @@ data: {"session": "rk2A..."}
 
 | Method | Path | Behavior |
 |---|---|---|
-| `POST` | `/v1/stream` | Start a new completion. Returns SSE: `message` per chunk, `done` on success, `error` on upstream failure. |
-| `GET`  | `/v1/stream/{session_id}/resume?from_index=N` | Re-attach to a paused or failed session. Replays accumulator starting after `from_index`. |
+| `POST` | `/v1/stream` | Start a new completion. Returns SSE: `message` per chunk, `done` on success, `error` on upstream failure. 503 when `max_sessions` streams are already running. |
+| `GET`  | `/v1/stream/{session_id}/resume?from_index=N` | Re-attach to a paused, failed or finished session. Replays the accumulator after `from_index`, then `done` (finished) or `error` (failed, or cut off by a disconnect). The completion is not re-run. |
 | `DELETE` | `/v1/stream/{session_id}` | Drop the session (cancels producer if still running). |
 | `GET`  | `/healthz` | `{"status": "ok", "active_sessions": N}` |
 
@@ -94,7 +94,7 @@ POST /v1/stream  ──►      │  StreamSession   │
 Any class with `model: str` and `stream(prompt) -> AsyncIterator[Chunk]` is a backend. Ships with:
 
 * **`MockLLM`** — deterministic, supports `delay`, `fail_after`, and an `on_cancel` callback. Used by every test.
-* **`AnthropicLLM`** — wraps `anthropic.AsyncAnthropic.messages.stream()`, normalises text deltas to `Chunk(text, index, finish)`.
+* **`AnthropicLLM`** — wraps `anthropic.AsyncAnthropic.messages.stream()`, normalises text deltas to `Chunk(text, index, finish)`. The client gets an explicit `timeout` (60 s for the connect and each read) and `max_retries` (2), so a stalled upstream fails the session instead of holding it for the SDK's 10-minute default.
 
 OpenAI / Groq / Bedrock adapters are mechanical — same interface, different SDK call.
 
@@ -107,12 +107,24 @@ pytest -v
 
 ```
 tests/test_app_integration.py::test_client_disconnect_cancels_producer PASSED
-tests/test_app_integration.py::test_backpressure_under_slow_consumer    PASSED
-tests/test_app_integration.py::test_mid_stream_error_then_resume        PASSED
-tests/test_session.py::test_session_runs_to_done                        PASSED
-tests/test_session.py::test_session_failure_preserves_partial           PASSED
+tests/test_app_integration.py::test_backpressure_under_slow_consumer PASSED
+tests/test_app_integration.py::test_mid_stream_error_then_resume PASSED
+tests/test_app_integration.py::test_resume_after_disconnect_replays_without_restarting_upstream PASSED
+tests/test_app_integration.py::test_stream_rejected_when_session_limit_reached PASSED
+tests/test_app_integration.py::test_burst_beyond_session_limit_is_refused_without_evicting_live_streams PASSED
+tests/test_app_integration.py::test_client_gone_before_first_event_leaves_a_paused_session PASSED
+tests/test_app_integration.py::test_healthz_does_not_count_expired_sessions PASSED
+tests/test_backends.py::test_anthropic_client_gets_explicit_timeout_and_retries PASSED
+tests/test_backends.py::test_anthropic_timeout_and_retries_are_configurable PASSED
+tests/test_session.py::test_session_runs_to_done PASSED
+tests/test_session.py::test_session_failure_preserves_partial PASSED
 tests/test_session.py::test_backpressure_blocks_producer_when_consumer_slow PASSED
-6 passed in 1.20s
+tests/test_session.py::test_finished_sessions_expire_after_ttl PASSED
+tests/test_session.py::test_session_whose_response_never_started_expires PASSED
+tests/test_session.py::test_wall_clock_jump_does_not_expire_sessions PASSED
+tests/test_session.py::test_session_cap_evicts_oldest_finished_then_refuses PASSED
+tests/test_session.py::test_session_cap_does_not_evict_a_session_that_has_not_started_yet PASSED
+18 passed in 2.54s
 ```
 
 ### What each integration test checks
@@ -120,6 +132,7 @@ tests/test_session.py::test_backpressure_blocks_producer_when_consumer_slow PASS
 * **`test_client_disconnect_cancels_producer`** — after 3 chunks are delivered, the harness emits `http.disconnect`. The producer stops within a handful of tokens (asserted `< 30` of 200), and the session is in `PAUSED` state in the registry.
 * **`test_backpressure_under_slow_consumer`** — `send()` sleeps 20 ms per chunk. With `queue_maxsize=4`, the producer never runs more than `delivered + maxsize + writer_in_flight` tokens ahead.
 * **`test_mid_stream_error_then_resume`** — `MockLLM(fail_after=3)`. The first response emits 3 `message` events then an `error` event with `partial_text="alpha beta gamma"`. A `GET /resume` replays the same partial and re-emits the same error event (FAILED sessions stay FAILED).
+* **`test_resume_after_disconnect_replays_without_restarting_upstream`** — disconnect after 3 chunks, then resume twice from the last index seen. Each resume replays exactly the chunks produced after it and ends with an `error` event; the session stays `PAUSED` and the backend yields no new tokens.
 
 ## Project layout
 
@@ -139,7 +152,7 @@ tests/test_session.py::test_backpressure_blocks_producer_when_consumer_slow PASS
 
 ## Limitations
 
-**In-process session registry.** Sessions live in memory. A real deployment behind a load balancer needs Redis (or similar) so a resume request can hit a different worker. The `StreamRegistry` interface is intentionally small — swapping the dict for a Redis-backed implementation is a few hundred lines.
+**In-process session registry.** Sessions live in memory. A real deployment behind a load balancer needs Redis (or similar) so a resume request can hit a different worker. The `StreamRegistry` interface is intentionally small — swapping the dict for a Redis-backed implementation is a few hundred lines. Memory is bounded: a stopped session (done, failed or paused) is dropped `session_ttl` seconds later (default 300), and the registry holds at most `max_sessions` (default 1000). At the cap the oldest stopped sessions make room, including the paused session a client leaves behind when it disconnects before the first event; if every session is still streaming or about to start, `POST /v1/stream` returns 503. The cap is global, not per client, so one client holding `max_sessions` slow streams open gets every other client a 503.
 
 **No streaming auth/quota gate.** There's no per-key rate limit or auth middleware shipped here. Wire your own FastAPI dependency for those.
 

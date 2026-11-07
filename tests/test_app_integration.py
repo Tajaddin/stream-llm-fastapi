@@ -272,3 +272,122 @@ async def test_mid_stream_error_then_resume():
 
     resume_errs = [e for e in events2 if e.get("event") == "error"]
     assert resume_errs, "resume should re-emit the error event for FAILED sessions"
+
+
+@pytest.mark.asyncio
+async def test_resume_after_disconnect_replays_without_restarting_upstream():
+    """A client that disconnects mid-stream can resume: it gets every chunk
+    produced after the last one it saw, then a terminal event. The upstream
+    call is not re-run, and the session stays resumable."""
+    backend = MockLLM(response=" ".join(f"t{i}" for i in range(40)), delay=0.01)
+    app = create_app(backend_factory=lambda: backend, queue_maxsize=4)
+
+    cap = await _run_request(
+        app,
+        _scope("POST", "/v1/stream"),
+        b'{"prompt":"hi"}',
+        disconnect_after_chunks=3,
+    )
+    await asyncio.sleep(0.1)
+
+    session = next(iter(app.state.registry.sessions.values()))
+    assert session.state == SessionState.PAUSED
+    seen = [e["data"] for e in cap.parse_sse() if e.get("event") == "message"]
+    last = seen[-1]["index"]
+    yielded = backend.chunks_yielded
+
+    for _ in range(2):
+        scope = _scope("GET", f"/v1/stream/{session.session_id}/resume")
+        scope["query_string"] = f"from_index={last}".encode()
+        cap2 = await asyncio.wait_for(_run_request(app, scope, b""), 5)
+
+        assert cap2.status == 200
+        events = cap2.parse_sse()
+        replayed = [e["data"] for e in events if e.get("event") == "message"]
+        assert [d["index"] for d in replayed] == list(range(last + 1, len(session.accumulator)))
+        assert "".join(d["text"] for d in seen + replayed) == session.partial_text
+        assert events[-1]["event"] == "error"
+        assert events[-1]["data"]["partial_text"] == session.partial_text
+
+    assert session.state == SessionState.PAUSED
+    assert backend.chunks_yielded == yielded, "resume must not re-run the upstream call"
+
+
+@pytest.mark.asyncio
+async def test_stream_rejected_when_session_limit_reached():
+    app = create_app(backend_factory=lambda: MockLLM(), max_sessions=1)
+    busy = app.state.registry.new_session(prompt="busy", backend=MockLLM(delay=60.0))
+    busy.producer_task = asyncio.create_task(busy.run())
+
+    cap = await _run_request(app, _scope("POST", "/v1/stream"), b'{"prompt":"hi"}')
+
+    assert cap.status == 503
+    busy.producer_task.cancel()
+    await asyncio.gather(busy.producer_task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_burst_beyond_session_limit_is_refused_without_evicting_live_streams():
+    """Each handler returns before its response starts the producer, so a
+    burst of POSTs must not evict each other's streams to make room."""
+    backends: list[MockLLM] = []
+
+    def factory():
+        backends.append(MockLLM(response="a b c", delay=0.05))
+        return backends[-1]
+
+    app = create_app(backend_factory=factory, max_sessions=2)
+
+    caps = await asyncio.wait_for(
+        asyncio.gather(
+            *(
+                _run_request(app, _scope("POST", "/v1/stream"), b'{"prompt":"hi"}')
+                for _ in range(20)
+            )
+        ),
+        10,
+    )
+
+    assert sorted(c.status for c in caps) == [200] * 2 + [503] * 18
+    assert sum(1 for b in backends if b.chunks_yielded) == 2
+    served = {c.parse_sse()[0]["data"]["session"] for c in caps if c.status == 200}
+    assert served == set(app.state.registry.sessions)
+
+
+@pytest.mark.asyncio
+async def test_client_gone_before_first_event_leaves_a_paused_session():
+    """The client disconnects while the response headers are still being
+    sent, so the body, and with it the producer, never starts. The session
+    must stop like any other disconnected stream and free its slot."""
+    backend = MockLLM()
+    app = create_app(backend_factory=lambda: backend, max_sessions=1)
+    messages = [{"type": "http.request", "body": b'{"prompt":"hi"}', "more_body": False}]
+
+    async def receive():
+        return messages.pop() if messages else {"type": "http.disconnect"}
+
+    async def send(msg):
+        if msg["type"] == "http.response.start":
+            await asyncio.sleep(0.1)
+
+    await asyncio.wait_for(app(_scope("POST", "/v1/stream"), receive, send), 5)
+
+    (session,) = app.state.registry.sessions.values()
+    assert session.producer_task is None
+    assert backend.chunks_yielded == 0
+    assert session.state == SessionState.PAUSED
+
+    cap = await _run_request(app, _scope("POST", "/v1/stream"), b'{"prompt":"hi"}')
+    assert cap.status == 200
+
+
+@pytest.mark.asyncio
+async def test_healthz_does_not_count_expired_sessions():
+    app = create_app(session_ttl=60.0)
+    expired = app.state.registry.new_session(prompt="p", backend=MockLLM())
+    expired.created_at -= 61.0
+
+    cap = await _run_request(app, _scope("GET", "/healthz"), b"")
+
+    assert cap.status == 200
+    assert json.loads(cap.body_text)["active_sessions"] == 0

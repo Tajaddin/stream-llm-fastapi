@@ -16,6 +16,7 @@ from stream_llm_fastapi.backends import (
     MockLLM,
 )
 from stream_llm_fastapi.session import (
+    SessionLimitError,
     StreamRegistry,
     StreamSession,
     SessionState,
@@ -28,6 +29,7 @@ __all__ = [
     "LLMBackend",
     "LLMError",
     "MockLLM",
+    "SessionLimitError",
     "StreamRegistry",
     "StreamSession",
     "SessionState",

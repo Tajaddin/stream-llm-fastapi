@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import time
 
 import pytest
 
 from stream_llm_fastapi.backends import MockLLM
-from stream_llm_fastapi.session import SessionState, StreamRegistry
+from stream_llm_fastapi.session import SessionLimitError, SessionState, StreamRegistry
 
 
 async def _drain(session, registry):
@@ -71,3 +72,84 @@ async def test_backpressure_blocks_producer_when_consumer_slow():
         await session.producer_task
     except asyncio.CancelledError:
         pass
+
+
+async def _finished_session(registry):
+    session = registry.new_session(prompt="p", backend=MockLLM(response="a b"))
+    session.producer_task = asyncio.create_task(session.run())
+    await _drain(session, registry)
+    await session.producer_task
+    return session
+
+
+@pytest.mark.asyncio
+async def test_finished_sessions_expire_after_ttl():
+    registry = StreamRegistry(session_ttl=60.0)
+    old = await _finished_session(registry)
+    fresh = await _finished_session(registry)
+    old.finished_at -= 61.0
+
+    registry.new_session(prompt="p", backend=MockLLM())
+
+    assert old.session_id not in registry.sessions
+    assert registry.get(fresh.session_id) is fresh
+
+
+def test_session_whose_response_never_started_expires():
+    registry = StreamRegistry(session_ttl=60.0)
+    session = registry.new_session(prompt="p", backend=MockLLM())
+    session.created_at -= 61.0
+
+    assert registry.get(session.session_id) is None
+
+
+@pytest.mark.asyncio
+async def test_wall_clock_jump_does_not_expire_sessions(monkeypatch):
+    registry = StreamRegistry(session_ttl=60.0)
+    finished = await _finished_session(registry)
+    never_started = registry.new_session(prompt="p", backend=MockLLM())
+    wall = time.time()
+    monkeypatch.setattr(time, "time", lambda: wall + 3600.0)
+
+    assert registry.get(finished.session_id) is finished
+    assert registry.get(never_started.session_id) is never_started
+
+
+def _running_session(registry):
+    session = registry.new_session(prompt="p", backend=MockLLM(delay=60.0))
+    session.producer_task = asyncio.create_task(session.run())
+    return session
+
+
+async def _stop(*sessions):
+    for session in sessions:
+        session.producer_task.cancel()
+    await asyncio.gather(*(s.producer_task for s in sessions), return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_session_cap_evicts_oldest_finished_then_refuses():
+    registry = StreamRegistry(max_sessions=2)
+    finished = await _finished_session(registry)
+    running = _running_session(registry)
+
+    third = _running_session(registry)
+    assert finished.session_id not in registry.sessions
+    assert set(registry.sessions) == {running.session_id, third.session_id}
+
+    with pytest.raises(SessionLimitError):
+        registry.new_session(prompt="p", backend=MockLLM())
+    await _stop(running, third)
+
+
+@pytest.mark.asyncio
+async def test_session_cap_does_not_evict_a_session_that_has_not_started_yet():
+    registry = StreamRegistry(max_sessions=2)
+    starting = registry.new_session(prompt="p", backend=MockLLM())
+    running = _running_session(registry)
+
+    with pytest.raises(SessionLimitError):
+        registry.new_session(prompt="p", backend=MockLLM())
+
+    assert set(registry.sessions) == {starting.session_id, running.session_id}
+    await _stop(running)
